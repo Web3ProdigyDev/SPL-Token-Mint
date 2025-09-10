@@ -1,7 +1,7 @@
 [package]
 name = "spl-token-mint"
 version = "0.1.0"
-description = "SPL Token Mint Program"
+description = "SPL Token Mint Smart Contract"
 edition = "2021"
 
 [lib]
@@ -14,9 +14,25 @@ cpi = ["no-entrypoint"]
 no-entrypoint = []
 no-idl = []
 no-log-ix-name = []
-idl-build = ["anchor-lang/idl-build"]
-
+idl-build = [
+    "anchor-lang/idl-build",
+    "anchor-spl/idl-build",
+]
+# Add features to resolve cfg warnings
+custom-heap = []
+custom-panic = []
+anchor-debug = []
 
 [dependencies]
-anchor-lang = "0.31.1"
+anchor-lang = { version = "0.31.1", features = ["init-if-needed"] }
+anchor-spl = { version = "0.31.1", features = ["token"] }
 
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1
+
+[profile.release.build-override]
+opt-level = 3
+incremental = false
+codegen-units = 1

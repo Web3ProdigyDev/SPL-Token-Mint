@@ -1,16 +1,359 @@
 use anchor_lang::prelude::*;
+use anchor_spl::{
+    associated_token::AssociatedToken,
+    token::{self, Mint, Token, TokenAccount, Burn as SplBurn, MintTo as SplMintTo, Transfer as SplTransfer, SetAuthority as SplSetAuthority, spl_token::instruction::AuthorityType},
+};
 
 declare_id!("GV5hMeyznNNy3dvjGfGgaMHqczjCdjTdRAv9K24yJHBC");
+
+#[error_code]
+pub enum TokenError {
+    #[msg("Invalid amount: amount must be greater than 0")]
+    InvalidAmount,
+    
+    #[msg("Insufficient funds: not enough tokens in source account")]
+    InsufficientFunds,
+    
+    #[msg("Invalid owner: authority does not own the source account")]
+    InvalidOwner,
+    
+    #[msg("Mint mismatch: source and destination accounts have different mints")]
+    MintMismatch,
+    
+    #[msg("Supply overflow: minting would exceed maximum supply")]
+    SupplyOverflow,
+    
+    #[msg("Unauthorized: caller is not the mint authority")]
+    Unauthorized,
+    
+    #[msg("Account not initialized")]
+    AccountNotInitialized,
+    
+    #[msg("Invalid transfer: cannot transfer to the same account")]
+    InvalidTransfer,
+    
+    #[msg("Mint authority cannot be changed")]
+    MintAuthorityImmutable,
+    
+    #[msg("Invalid decimals: decimals must be between 0 and 9")]
+    InvalidDecimals,
+
+    #[msg("Token account is frozen")]
+    AccountFrozen,
+
+    #[msg("Invalid authority type")]
+    InvalidAuthorityType,
+
+    #[msg("Authority already set")]
+    AuthorityAlreadySet,
+
+    #[msg("Cannot burn more tokens than available")]
+    BurnAmountExceedsBalance,
+
+    #[msg("Program account mismatch")]
+    ProgramAccountMismatch,
+}
+
+#[derive(Accounts)]
+pub struct InitializeMint<'info> {
+    #[account(
+        init,
+        payer = payer,
+        space = 82,
+    )]
+    pub mint: Account<'info, Mint>,
+
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+#[derive(Accounts)]
+pub struct MintTokens<'info> {
+    #[account(mut)]
+    pub mint: Account<'info, Mint>,
+
+    #[account(
+        init_if_needed,
+        payer = mint_authority,
+        associated_token::mint = mint,
+        associated_token::authority = destination_owner,
+    )]
+    pub destination: Account<'info, TokenAccount>,
+
+    /// CHECK: This is the destination token account owner
+    pub destination_owner: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub mint_authority: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+#[derive(Accounts)]
+pub struct TransferTokens<'info> {
+    #[account(mut)]
+    pub from: Account<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub to: Account<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    pub token_program: Program<'info, Token>,
+}
+
+#[derive(Accounts)]
+pub struct GetMintInfo<'info> {
+    pub mint: Account<'info, Mint>,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize)]
+pub struct MintInfo {
+    pub supply: u64,
+    pub decimals: u8,
+    pub mint_authority: Option<Pubkey>,
+    pub freeze_authority: Option<Pubkey>,
+}
+
+#[derive(Accounts)]
+pub struct BurnTokens<'info> {
+    #[account(mut)]
+    pub mint: Account<'info, Mint>,
+
+    #[account(mut)]
+    pub token_account: Account<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    pub token_program: Program<'info, Token>,
+}
+
+#[derive(Accounts)]
+pub struct SetMintAuthority<'info> {
+    #[account(mut)]
+    pub mint: Account<'info, Mint>,
+
+    #[account(mut)]
+    pub current_authority: Signer<'info>,
+
+    pub token_program: Program<'info, Token>,
+}
 
 #[program]
 pub mod spl_token_mint {
     use super::*;
 
-    pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
-        msg!("Greetings from: {:?}", ctx.program_id);
+    /// Initialize a new mint with specified parameters
+    pub fn initialize_mint(
+        ctx: Context<InitializeMint>,
+        decimals: u8,
+        mint_authority: Pubkey,
+        freeze_authority: Option<Pubkey>,
+    ) -> Result<()> {
+        // Validate decimals
+        require!(decimals <= 9, TokenError::InvalidDecimals);
+
+        // Initialize the mint using CPI to the token program
+        let cpi_accounts = anchor_spl::token::InitializeMint {
+            mint: ctx.accounts.mint.to_account_info(),
+            rent: ctx.accounts.rent.to_account_info(),
+        };
+        let cpi_program = ctx.accounts.token_program.to_account_info();
+        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
+
+        anchor_spl::token::initialize_mint(cpi_ctx, decimals, &mint_authority, freeze_authority.as_ref())?;
+
+        msg!("Token mint initialized successfully!");
+        msg!("Mint address: {}", ctx.accounts.mint.key());
+        msg!("Mint authority: {}", mint_authority);
+        if let Some(freeze_auth) = freeze_authority {
+            msg!("Freeze authority: {}", freeze_auth);
+        } else {
+            msg!("Freeze authority: None");
+        }
+        msg!("Decimals: {}", decimals);
+        
+        Ok(())
+    }
+
+    /// Mint tokens to a destination account
+    pub fn mint_tokens(ctx: Context<MintTokens>, amount: u64) -> Result<()> {
+        // Validate amount is not zero
+        require!(amount > 0, TokenError::InvalidAmount);
+
+        // Check for potential overflow
+        let current_supply = ctx.accounts.mint.supply;
+        require!(
+            current_supply.checked_add(amount).is_some(),
+            TokenError::SupplyOverflow
+        );
+
+        // Mint tokens
+        let cpi_accounts = SplMintTo {
+            mint: ctx.accounts.mint.to_account_info(),
+            to: ctx.accounts.destination.to_account_info(),
+            authority: ctx.accounts.mint_authority.to_account_info(),
+        };
+
+        let cpi_program = ctx.accounts.token_program.to_account_info();
+        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
+
+        token::mint_to(cpi_ctx, amount)?;
+
+        msg!("Minted {} tokens to {}", amount, ctx.accounts.destination.key());
+        
+        Ok(())
+    }
+
+    /// Transfer tokens between accounts
+    pub fn transfer_tokens(ctx: Context<TransferTokens>, amount: u64) -> Result<()> {
+        // Validate amount
+        require!(amount > 0, TokenError::InvalidAmount);
+
+        // Check sufficient balance
+        require!(
+            ctx.accounts.from.amount >= amount,
+            TokenError::InsufficientFunds
+        );
+
+        // Verify authority owns the source account
+        require!(
+            ctx.accounts.from.owner == ctx.accounts.authority.key(),
+            TokenError::InvalidOwner
+        );
+
+        // Verify both accounts have the same mint
+        require!(
+            ctx.accounts.from.mint == ctx.accounts.to.mint,
+            TokenError::MintMismatch
+        );
+
+        // Additional security: prevent self-transfer
+        require!(
+            ctx.accounts.from.key() != ctx.accounts.to.key(),
+            TokenError::InvalidTransfer
+        );
+
+        // Perform transfer
+        let cpi_accounts = SplTransfer {
+            from: ctx.accounts.from.to_account_info(),
+            to: ctx.accounts.to.to_account_info(),
+            authority: ctx.accounts.authority.to_account_info(),
+        };
+
+        let cpi_program = ctx.accounts.token_program.to_account_info();
+        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
+
+        token::transfer(cpi_ctx, amount)?;
+
+        msg!(
+            "Transferred {} tokens from {} to {}",
+            amount,
+            ctx.accounts.from.key(),
+            ctx.accounts.to.key()
+        );
+
+        Ok(())
+    }
+
+    /// Get mint information
+    pub fn get_mint_info(ctx: Context<GetMintInfo>) -> Result<MintInfo> {
+        let mint = &ctx.accounts.mint;
+        
+        Ok(MintInfo {
+            supply: mint.supply,
+            decimals: mint.decimals,
+            mint_authority: mint.mint_authority.into(),
+            freeze_authority: mint.freeze_authority.into(),
+        })
+    }
+
+    /// Burn tokens from an account
+    pub fn burn_tokens(ctx: Context<BurnTokens>, amount: u64) -> Result<()> {
+        // Validate amount
+        require!(amount > 0, TokenError::InvalidAmount);
+
+        // Check sufficient balance
+        require!(
+            ctx.accounts.token_account.amount >= amount,
+            TokenError::InsufficientFunds
+        );
+
+        // Verify authority owns the token account
+        require!(
+            ctx.accounts.token_account.owner == ctx.accounts.authority.key(),
+            TokenError::InvalidOwner
+        );
+
+        // Verify the token account belongs to the correct mint
+        require!(
+            ctx.accounts.token_account.mint == ctx.accounts.mint.key(),
+            TokenError::MintMismatch
+        );
+
+        // Burn tokens
+        let cpi_accounts = SplBurn {
+            mint: ctx.accounts.mint.to_account_info(),
+            from: ctx.accounts.token_account.to_account_info(),
+            authority: ctx.accounts.authority.to_account_info(),
+        };
+
+        let cpi_program = ctx.accounts.token_program.to_account_info();
+        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
+
+        token::burn(cpi_ctx, amount)?;
+
+        msg!("Burned {} tokens from {}", amount, ctx.accounts.token_account.key());
+
+        Ok(())
+    }
+
+    /// Set mint authority (can be used to revoke mint authority by setting to None)
+    pub fn set_mint_authority(
+        ctx: Context<SetMintAuthority>,
+        new_authority: Option<Pubkey>,
+    ) -> Result<()> {
+        // Verify current authority
+        require!(
+            ctx.accounts.mint.mint_authority.is_some(),
+            TokenError::Unauthorized
+        );
+        
+        require!(
+            ctx.accounts.mint.mint_authority.unwrap() == ctx.accounts.current_authority.key(),
+            TokenError::Unauthorized
+        );
+
+        // Set new mint authority (can be None to revoke mint authority permanently)
+        let cpi_accounts = SplSetAuthority {
+            account_or_mint: ctx.accounts.mint.to_account_info(),
+            current_authority: ctx.accounts.current_authority.to_account_info(),
+        };
+
+        let cpi_program = ctx.accounts.token_program.to_account_info();
+        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
+
+        // Use the proper AuthorityType::MintTokens
+        token::set_authority(cpi_ctx, AuthorityType::MintTokens, new_authority)?;
+
+        match new_authority {
+            Some(authority) => {
+                msg!("Mint authority changed to: {}", authority);
+            }
+            None => {
+                msg!("Mint authority revoked permanently");
+            }
+        }
+
         Ok(())
     }
 }
-
-#[derive(Accounts)]
-pub struct Initialize {}
