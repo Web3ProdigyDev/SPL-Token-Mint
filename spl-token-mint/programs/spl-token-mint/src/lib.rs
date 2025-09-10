@@ -59,9 +59,11 @@ pub struct InitializeMint<'info> {
     #[account(
         init,
         payer = payer,
-        space = 82,
+        space = 82, // Just the mint size, no discriminator needed
+        owner = token_program.key(),
     )]
-    pub mint: Account<'info, Mint>,
+    /// CHECK: This will be initialized as a mint account by the token program
+    pub mint: UncheckedAccount<'info>,
 
     #[account(mut)]
     pub payer: Signer<'info>,

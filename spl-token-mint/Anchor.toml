@@ -5,15 +5,15 @@ package_manager = "npm"
 resolution = true
 skip-lint = false
 
-[programs.devnet]
+[programs.localnet]
 spl_token_mint = "GV5hMeyznNNy3dvjGfGgaMHqczjCdjTdRAv9K24yJHBC"
 
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "devnet"
+cluster = "localnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
-test = "npm run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
+test = "npm run ts-mocha -- -p ./tsconfig.json --timeout 1000000 tests/**/*.ts"
