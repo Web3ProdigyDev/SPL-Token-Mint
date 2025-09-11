@@ -52,6 +52,23 @@ pub enum TokenError {
 
     #[msg("Program account mismatch")]
     ProgramAccountMismatch,
+
+    #[msg("Invalid metadata: name cannot be empty")]
+    InvalidName,
+
+    #[msg("Invalid metadata: symbol cannot be empty")]
+    InvalidSymbol,
+
+    #[msg("Invalid metadata: URI too long (max 200 characters)")]
+    UriTooLong,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct TokenMetadata {
+    pub name: String,
+    pub symbol: String,
+    pub uri: String,
+    pub seller_fee_basis_points: u16,
 }
 
 #[derive(Accounts)]
@@ -59,7 +76,7 @@ pub struct InitializeMint<'info> {
     #[account(
         init,
         payer = payer,
-        space = 82, // Just the mint size, no discriminator needed
+        space = 82,
         owner = token_program.key(),
     )]
     /// CHECK: This will be initialized as a mint account by the token program
@@ -70,6 +87,45 @@ pub struct InitializeMint<'info> {
 
     pub system_program: Program<'info, System>,
     pub token_program: Program<'info, Token>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+#[derive(Accounts)]
+pub struct CreateTokenWithMetadata<'info> {
+    #[account(
+        init,
+        payer = payer,
+        space = 82,
+        owner = token_program.key(),
+    )]
+    /// CHECK: This will be initialized as a mint account by the token program
+    pub mint: UncheckedAccount<'info>,
+
+    /// CHECK: This is the metadata account that will be created by Metaplex
+    #[account(
+        mut,
+        seeds = [
+            "metadata".as_bytes(),
+            token_metadata_program.key().as_ref(),
+            mint.key().as_ref(),
+        ],
+        bump,
+        seeds::program = token_metadata_program.key(),
+    )]
+    pub metadata: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    /// CHECK: This is the update authority for the metadata
+    pub update_authority: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
+    
+    /// CHECK: This is the Metaplex Token Metadata program
+    pub token_metadata_program: UncheckedAccount<'info>,
+    
     pub rent: Sysvar<'info, Rent>,
 }
 
@@ -154,7 +210,7 @@ pub struct SetMintAuthority<'info> {
 pub mod spl_token_mint {
     use super::*;
 
-    /// Initialize a new mint with specified parameters
+    /// Initialize a new mint with specified parameters (basic version without metadata)
     pub fn initialize_mint(
         ctx: Context<InitializeMint>,
         decimals: u8,
@@ -184,6 +240,84 @@ pub mod spl_token_mint {
         }
         msg!("Decimals: {}", decimals);
         
+        Ok(())
+    }
+
+    /// Create a new token with metadata (name, symbol, logo URI)
+    /// This function creates the mint and prepares for metadata creation
+    pub fn create_token_with_metadata(
+        ctx: Context<CreateTokenWithMetadata>,
+        decimals: u8,
+        metadata: TokenMetadata,
+        mint_authority: Pubkey,
+        freeze_authority: Option<Pubkey>,
+    ) -> Result<()> {
+        // Validate inputs
+        require!(decimals <= 9, TokenError::InvalidDecimals);
+        require!(!metadata.name.is_empty(), TokenError::InvalidName);
+        require!(!metadata.symbol.is_empty(), TokenError::InvalidSymbol);
+        require!(metadata.uri.len() <= 200, TokenError::UriTooLong);
+
+        // First, initialize the mint
+        let cpi_accounts = anchor_spl::token::InitializeMint {
+            mint: ctx.accounts.mint.to_account_info(),
+            rent: ctx.accounts.rent.to_account_info(),
+        };
+        let cpi_program = ctx.accounts.token_program.to_account_info();
+        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
+
+        anchor_spl::token::initialize_mint(cpi_ctx, decimals, &mint_authority, freeze_authority.as_ref())?;
+
+        // Create metadata using raw instruction - clone the strings before passing
+        let metadata_instruction_data = create_metadata_instruction_data(
+            ctx.accounts.metadata.key(),
+            ctx.accounts.mint.key(),
+            ctx.accounts.payer.key(),
+            ctx.accounts.payer.key(),
+            ctx.accounts.update_authority.key(),
+            metadata.name.clone(),
+            metadata.symbol.clone(),
+            metadata.uri.clone(),
+            metadata.seller_fee_basis_points,
+        );
+
+        let accounts = vec![
+            ctx.accounts.metadata.to_account_info(),
+            ctx.accounts.mint.to_account_info(),
+            ctx.accounts.payer.to_account_info(),
+            ctx.accounts.payer.to_account_info(), // mint_authority
+            ctx.accounts.update_authority.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+            ctx.accounts.rent.to_account_info(),
+        ];
+
+        let create_metadata_ix = anchor_lang::solana_program::instruction::Instruction {
+            program_id: ctx.accounts.token_metadata_program.key(),
+            accounts: vec![
+                anchor_lang::solana_program::instruction::AccountMeta::new(ctx.accounts.metadata.key(), false),
+                anchor_lang::solana_program::instruction::AccountMeta::new_readonly(ctx.accounts.mint.key(), false),
+                anchor_lang::solana_program::instruction::AccountMeta::new_readonly(ctx.accounts.payer.key(), true),
+                anchor_lang::solana_program::instruction::AccountMeta::new(ctx.accounts.payer.key(), true),
+                anchor_lang::solana_program::instruction::AccountMeta::new_readonly(ctx.accounts.update_authority.key(), false),
+                anchor_lang::solana_program::instruction::AccountMeta::new_readonly(ctx.accounts.system_program.key(), false),
+                anchor_lang::solana_program::instruction::AccountMeta::new_readonly(ctx.accounts.rent.key(), false),
+            ],
+            data: metadata_instruction_data,
+        };
+
+        anchor_lang::solana_program::program::invoke(
+            &create_metadata_ix,
+            &accounts,
+        )?;
+
+        msg!("Token created successfully!");
+        msg!("Mint address: {}", ctx.accounts.mint.key());
+        msg!("Metadata address: {}", ctx.accounts.metadata.key());
+        msg!("Name: {}", metadata.name);
+        msg!("Symbol: {}", metadata.symbol);
+        msg!("URI: {}", metadata.uri);
+        msg!("Decimals: {}", decimals);
+
         Ok(())
     }
 
@@ -344,7 +478,6 @@ pub mod spl_token_mint {
         let cpi_program = ctx.accounts.token_program.to_account_info();
         let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
 
-        // Use the proper AuthorityType::MintTokens
         token::set_authority(cpi_ctx, AuthorityType::MintTokens, new_authority)?;
 
         match new_authority {
@@ -358,4 +491,46 @@ pub mod spl_token_mint {
 
         Ok(())
     }
+}
+
+// Helper function to create metadata instruction data
+fn create_metadata_instruction_data(
+    _metadata_key: Pubkey,
+    _mint_key: Pubkey,
+    _mint_authority_key: Pubkey,
+    payer_key: Pubkey,
+    _update_authority_key: Pubkey,
+    name: String,
+    symbol: String,
+    uri: String,
+    seller_fee_basis_points: u16,
+) -> Vec<u8> {
+    // This is a simplified version - in production, you'd want to use proper Metaplex instruction encoding
+    // For now, this creates the basic structure needed for metadata creation
+    let mut data = Vec::new();
+    
+    // Instruction discriminator for CreateMetadataAccountV3 (33 in decimal)
+    data.push(33);
+    
+    // Add basic metadata fields (this is a simplified encoding)
+    // In production, use proper borsh serialization with Metaplex types
+    data.extend_from_slice(&name.len().to_le_bytes());
+    data.extend_from_slice(name.as_bytes());
+    data.extend_from_slice(&symbol.len().to_le_bytes());
+    data.extend_from_slice(symbol.as_bytes());
+    data.extend_from_slice(&uri.len().to_le_bytes());
+    data.extend_from_slice(uri.as_bytes());
+    data.extend_from_slice(&seller_fee_basis_points.to_le_bytes());
+    
+    // Add creator info (simplified)
+    data.push(1); // has creators
+    data.extend_from_slice(&payer_key.to_bytes());
+    data.push(1); // verified
+    data.push(100); // share
+    
+    // Collection and uses (none)
+    data.push(0); // no collection
+    data.push(0); // no uses
+    
+    data
 }
