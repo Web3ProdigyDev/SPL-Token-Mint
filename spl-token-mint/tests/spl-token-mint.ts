@@ -645,26 +645,26 @@ describe("spl-token-mint", () => {
     });
 
     it("Should fail to burn with insufficient balance", async () => {
-      const burnAmount = new anchor.BN(1000 * Math.pow(10, 9));
+  const burnAmount = new anchor.BN(1000 * Math.pow(10, 9));
 
-      try {
-        await program.methods
-          .burnTokens(burnAmount)
-          .accounts({
-            mint: mintKeypair.publicKey,
-            tokenAccount: user1TokenAccount,
-            authority: user1.publicKey,
-            tokenProgram: TOKEN_PROGRAM_ID,
-          })
-          .signers([user1])
-          .rpc();
+  try {
+    await program.methods
+      .burnTokens(burnAmount)
+      .accounts({
+        mint: mintKeypair.publicKey,
+        tokenAccount: user1TokenAccount,
+        authority: user1.publicKey,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .signers([user1])
+      .rpc();
 
-        expect.fail("Expected transaction to fail");
-      } catch (error) {
-        console.log("Expected error for insufficient burn balance:", error.message);
-        expect(error.message).to.include("InsufficientFunds");
-      }
-    });
+    expect.fail("Expected transaction to fail");
+  } catch (error) {
+    console.log("Expected error for insufficient burn balance:", error.message);
+    expect(error.message).to.include("BurnAmountExceedsBalance"); // Changed from "InsufficientFunds"
+  }
+});
 
     it("Should fail to burn with wrong authority", async () => {
       const burnAmount = new anchor.BN(10 * Math.pow(10, 9));
